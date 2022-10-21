@@ -41,13 +41,6 @@ def makeMatchQuery(field: str, **option: Dict[str, str]):
         }
     }
 
-@app.post("/AI/{model_name}/")
-async def trainModel(model_name: str, images: List[str]):
-    print("Model Name:", model_name)
-    for image in images:
-        print(image)
-    return
-
 @app.post("/elastic/{field}/")
 async def getImagePath(field: str, option: Option):
     
