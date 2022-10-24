@@ -25,15 +25,7 @@ class Option(BaseModel):
     prefetch_factor: int = 2
     persistent_workers: bool = False
     model_name: str = 'efficientnet-b7'
-    query:Dict[str, str] = {
-        "_source": {
-            "includes": [
-                "path",
-                "image_type"
-            ]
-        },
-        "query":"NA"
-        }
+    query:Dict[str, str] = {"query":"NA"}
 
 @app.get("/")
 async def root():
@@ -43,6 +35,12 @@ async def root():
 
 def makeMatchQuery(field: str, **option: Dict[str, str]):
     return {
+        "_source": {
+            "includes": [
+                "path",
+                "image_type",
+            ]
+        },
         "query":{
             "match":{
                 field: option
