@@ -1,3 +1,5 @@
+import ai
+
 from xmlrpc.client import boolean
 from fastapi import FastAPI, Request
 import requests, os, json
@@ -14,17 +16,24 @@ class Option(BaseModel):
     epoch_size: int = 1
     batch_size: int = 1
     shuffle: bool = False
-    sampler: int = None
-    batch_sampler: int = None
     num_workers: int = 0
     collate_fn: int = None
-    pin_memory: int = None
+    pin_memory: bool = None
     drop_last: bool = False
     timeout: int = 0
     worker_init_fn: int = None
     prefetch_factor: int = 2
     persistent_workers: bool = False
-    query:Dict[str, str] = {"query":"NA"}
+    model_name: str = 'efficientnet-b7'
+    query:Dict[str, str] = {
+        "_source": {
+            "includes": [
+                "path",
+                "image_type"
+            ]
+        },
+        "query":"NA"
+        }
 
 @app.get("/")
 async def root():
@@ -49,11 +58,15 @@ async def getImagePath(field: str, option: Option):
     query_res = makeMatchQuery(field, **option.query)
     
     response = requests.get(
-        f"http://{ELASTIC_HOST}:{ELASTIC_PORT}/{INDEX}/_search?_source_includes=path",
+        f"http://{ELASTIC_HOST}:{ELASTIC_PORT}/{INDEX}/_search",
         headers=headers,
         data=json.dumps(query_res)
     ).json()
     
+    classes = set([i["_source"]["image_type"] for i in response["hits"]["hits"]])
     image_list = [i["_source"]["path"] for i in response["hits"]["hits"]]
+    
+    print(classes)
+    #ai.trainMain(option, image_list)
     
     return response
