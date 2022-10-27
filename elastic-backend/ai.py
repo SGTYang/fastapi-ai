@@ -1,87 +1,104 @@
-import ai
-from xmlrpc.client import boolean
-from fastapi import FastAPI, Request
-import requests, os, json
-from typing import Union, Dict, List
-from pydantic import BaseModel
+import torch
+from torch import optim
+from torch.utils.data import DataLoader
+from efficientnet_pytorch import EfficientNet
+from torch.utils.data import Dataset
+from torchvision import transforms
+from PIL import Image
+from torch import nn
+from torch.optim import lr_scheduler
 
-ELASTIC_HOST = os.environ.get("ELASTIC_HOST", "112.220.111.68")
-ELASTIC_PORT = os.environ.get("ELASTIC_PORT", "9200")
-INDEX = os.environ.get("ELASTIC_INDEX", "test_index")
+class GenerateDataset(Dataset):
+    def __init__(self, image: list, label: list, transform = None):
+        self.image, self.label = image, label
+        self.transform = transform
+    
+    def __len__(self):
+        return len(self.image)
 
-app = FastAPI()
+    def __getitem__(self, index):
+        return self.transform(Image.open(self.image[index])), self.label[index]
 
-class Option(BaseModel):
-    epoch_size: int = 1
-    batch_size: int = 1
-    shuffle: bool = False
-    num_workers: int = 0
-    collate_fn: int = None
-    pin_memory: bool = None
-    drop_last: bool = False
-    timeout: int = 0
-    worker_init_fn: int = None
-    prefetch_factor: int = 2
-    persistent_workers: bool = False
-    model_name: str = 'efficientnet-b7'
-    query:Dict[str, dict] = {
-        "terms": {"field": "image_type.keyword"}
-        }
+def setDevice():
+    return torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
 
-@app.get("/")
-async def root():
-    return {
-        "message": "Hello World"
-    }
+def setModel(model_name: str, num_classes: int):
+    image_size = EfficientNet.get_image_size(model_name)
+    pretrained = EfficientNet.from_pretrained(model_name, num_classes=num_classes)
+    return (image_size, pretrained)
 
-def makeMatchQuery(field: str, **option: Dict[str, str]):
-    return {
-        "_source": {
-            "includes": [
-                "path",
-                "image_type"
-            ]
-        },
-        "query":{
-            "match":{
-                field: option
-            }
-        },
-        "size": 300
-    }
+def makeTensor(image_path: list, label_list: list, image_size: int):
+    transform = transforms.Compose([
+        transforms.ToTensor(),
+        transforms.Resize(image_size),
+        transforms.CenterCrop(image_size)
+    ])
+    return GenerateDataset(image_path.copy(), label_list.copy(), transform=transform)
 
-def makeAggsQuery(field: str, **option: Dict[str, str]):
-    return {
-        "_source": {
-            "includes": [
-                "path",
-                "image_type"
-            ]
-        },
-        "aggs": {
-            field: option
-        },
-        "size": 300*11
-    }
+async def trainMain(TrainOption, class_and_image: dict):
+    option = TrainOption.copy()
+    image_path, image_label = map(list, zip(*class_and_image.copy().items()))
+    image_label_set = set(image_label)
+    image_size, pretrained_model = setModel(option.model_name, len(image_label_set))
+    device = setDevice()
+    pretrained_model.to(device)
     
-@app.post("/elastic/{field}/")
-async def getImagePath(field: str, option: Option):
+    optimizer_ft = optim.SGD(
+        pretrained_model.parameters(),
+        lr = 0.05,
+        momentum=0.9,
+        weight_decay=1e-4
+        )
+    exp_lr_scheduler = lr_scheduler.StepLR(optimizer_ft, step_size=7, gamma=0.1)
+    pretrained_model.train()
     
-    headers = {'Content-Type': 'application/json'}
+    image_label_dict={val:idx for idx,val in enumerate(image_label_set)}
     
-    query_res = makeMatchQuery(field, **option.query)
-    aggs_res = makeAggsQuery(field, **option.query)
+    loaded_train_dataset = DataLoader(
+        dataset = makeTensor(
+            image_path, 
+            list(map(image_label_dict.get, image_label)), 
+            image_size
+            ),
+        batch_size = option.batch_size,
+        shuffle = option.shuffle,
+        # num_workers = option.num_workers,
+        # collate_fn = option.collate_fn,
+        # pin_memory = option.pin_memory,
+        # drop_last = option.drop_last,
+        # timeout = option.timeout,
+        # worker_init_fn = option.worker_init_fn,
+        # prefetch_factor = option.prefetch_factor,
+        # persistent_workers = option.persistent_workers,
+    )
     
-    response = requests.get(
-        f"http://{ELASTIC_HOST}:{ELASTIC_PORT}/{INDEX}/_search",
-        headers=headers,
-        data=json.dumps(aggs_res)
-    ).json()
-    
-    class_and_image = {i["_source"]["path"]: i["_source"]["image_type"] for i in response["hits"]["hits"]}
-    image_class = set([i["_source"]["image_type"] for i in response["hits"]["hits"]])
-    
-    print(image_class, len(class_and_image))
-    await ai.trainMain(option, class_and_image)
+    criterion = nn.CrossEntropyLoss()
+    torch.cuda.empty_cache()
+    for _ in range(option.epoch_size):
+        running_loss = 0.
+        running_corrects = 0
+        for idx, (input,label) in enumerate(loaded_train_dataset):
+            input = input.to(device)
+            label = label.to(device)
+            
+            optimizer_ft.zero_grad()
+            
+            with torch.set_grad_enabled(True):
+                outputs = pretrained_model(input)
+                _, preds = torch.max(outputs, 1)
+                loss = criterion(outputs, label)
+                
+                loss.backward()
+                optimizer_ft.step()
+            
+            running_loss += loss.item() * input.size(0)
+            running_corrects += torch.sum(preds == label.data)
+            print(f"Iteration:{idx+1}")
+        exp_lr_scheduler.step()
+        
+        epoch_loss = running_loss / len(image_path)
+        epoch_acc = running_corrects.double()/ len(image_path)
+        torch.cuda.empty_cache()
+        print(f"Loss: {epoch_loss:.4f} Acc:{epoch_acc:.4f}")
     
     return 0
