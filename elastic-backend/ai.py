@@ -1,70 +1,87 @@
+import ai
+from xmlrpc.client import boolean
+from fastapi import FastAPI, Request
+import requests, os, json
+from typing import Union, Dict, List
+from pydantic import BaseModel
 
-import torch
-from torch import optim
-from torch.utils.data import DataLoader
-from efficientnet_pytorch import EfficientNet
-from torch.utils.data import Dataset
-from torchvision import transforms
-from PIL import Image
+ELASTIC_HOST = os.environ.get("ELASTIC_HOST", "112.220.111.68")
+ELASTIC_PORT = os.environ.get("ELASTIC_PORT", "9200")
+INDEX = os.environ.get("ELASTIC_INDEX", "test_index")
 
-class GenerateDataset(Dataset):
-    def __init__(self, image_path_list: list, label: str, transform = None):
-        self.image_path_list = image_path_list
-        self.transform = transform
-        self.label = label
+app = FastAPI()
+
+class Option(BaseModel):
+    epoch_size: int = 1
+    batch_size: int = 1
+    shuffle: bool = False
+    num_workers: int = 0
+    collate_fn: int = None
+    pin_memory: bool = None
+    drop_last: bool = False
+    timeout: int = 0
+    worker_init_fn: int = None
+    prefetch_factor: int = 2
+    persistent_workers: bool = False
+    model_name: str = 'efficientnet-b7'
+    query:Dict[str, dict] = {
+        "terms": {"field": "image_type.keyword"}
+        }
+
+@app.get("/")
+async def root():
+    return {
+        "message": "Hello World"
+    }
+
+def makeMatchQuery(field: str, **option: Dict[str, str]):
+    return {
+        "_source": {
+            "includes": [
+                "path",
+                "image_type"
+            ]
+        },
+        "query":{
+            "match":{
+                field: option
+            }
+        },
+        "size": 300
+    }
+
+def makeAggsQuery(field: str, **option: Dict[str, str]):
+    return {
+        "_source": {
+            "includes": [
+                "path",
+                "image_type"
+            ]
+        },
+        "aggs": {
+            field: option
+        },
+        "size": 300*11
+    }
     
-    def __len__(self):
-        return len(self.image_path_list)
-
-    def __getitem__(self, index):
-        img_path = self.image_path_list[index]
-        img = self.transform(Image.open(img_path))
-        return img, self.label
-
-def setOptimizer(algo):
-    match algo:
-        case "Adadelta":
-            return 
-
-def setDevice():
-    return torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
-
-def setModel(model_name: str, num_classes: int):
-    image_size = EfficientNet.get_image_size(model_name)
-    return EfficientNet.from_pretrained(model_name, num_classes=num_classes)
-
-def makeTensor(image_path_list: list):
-    transform = transforms.Compose([
-        transforms.ToTensor(),
-        transforms.Resize
-    ])
-    return GenerateDataset(image_path_list, "test", transform=transform)
-
-def trainMain(TrainOption, image_path_list):
-    option = TrainOption.copy()
-    path_list = image_path_list.copy()
-    model = setModel(option.model_name)
-    device = setDevice()
+@app.post("/elastic/{field}/")
+async def getImagePath(field: str, option: Option):
     
-    loaded_train_dataset = DataLoader(
-        dataset = makeTensor(path_list),
-        batch_size = option.batch_size,
-        shuffle = option.shuffle,
-        sampler= option.sampler,
-        batch_sampler = option.batch_sampler,
-        num_workers = option.num_workers,
-        collate_fn = option.collate_fn,
-        pin_memory = option.pin_memory,
-        drop_last = option.drop_last,
-        timeout = option.timeout,
-        worker_init_fn = option.worker_init_fn,
-        prefetch_factor = option.prefetch_factor,
-        persistent_workers = option.persistent_workers,
-    )
+    headers = {'Content-Type': 'application/json'}
     
-    for _ in range(option.epoch_size):
-        for input, label in loaded_train_dataset:
-            model.train()
-            running_loss = running_corrects = num_cnt = 0
-            input = input.to(device)
-            label = label.to(device)
+    query_res = makeMatchQuery(field, **option.query)
+    aggs_res = makeAggsQuery(field, **option.query)
+    
+    response = requests.get(
+        f"http://{ELASTIC_HOST}:{ELASTIC_PORT}/{INDEX}/_search",
+        headers=headers,
+        data=json.dumps(aggs_res)
+    ).json()
+    
+    class_and_image = {i["_source"]["path"]: i["_source"]["image_type"] for i in response["hits"]["hits"]}
+    image_class = set([i["_source"]["image_type"] for i in response["hits"]["hits"]])
+    
+    print(image_class, len(class_and_image))
+    await ai.trainMain(option, class_and_image)
+    
+    return 0
