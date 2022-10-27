@@ -1,3 +1,4 @@
+import ai
 from xmlrpc.client import boolean
 from fastapi import FastAPI, Request
 import requests, os, json
@@ -63,7 +64,6 @@ def makeAggsQuery(field: str, **option: Dict[str, str]):
         "size": 300*11
     }
     
-
 @app.post("/elastic/{field}/")
 async def getImagePath(field: str, option: Option):
     
@@ -80,10 +80,8 @@ async def getImagePath(field: str, option: Option):
     
     class_and_image = {i["_source"]["path"]: i["_source"]["image_type"] for i in response["hits"]["hits"]}
     image_class = set([i["_source"]["image_type"] for i in response["hits"]["hits"]])
-    image_class_list = [i["_source"]["image_type"] for i in response["hits"]["hits"]]
-    image_list = [i["_source"]["path"] for i in response["hits"]["hits"]]
     
     print(image_class, len(class_and_image))
-    #ai.trainMain(option, image_list)
+    await ai.trainMain(option, class_and_image)
     
-    return response
+    return 0
