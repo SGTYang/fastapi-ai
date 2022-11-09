@@ -26,11 +26,6 @@ class Option(BaseModel):
     model_name: str = 'efficientnet-b7'
     match_field: str = "image_class"
     match: List[str] = ["NA"]
-    query: Dict[str, dict] = {
-        "image_class": {
-            "field": "image_class"
-            }
-        }
 
 @app.get("/")
 async def root():
