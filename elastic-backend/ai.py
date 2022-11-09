@@ -35,7 +35,7 @@ def makeTensor(image_path: list, label_list: list, image_size: int):
     ])
     return GenerateDataset(image_path.copy(), label_list.copy(), transform=transform)
 
-async def trainMain(TrainOption, class_and_image: dict):
+def trainMain(TrainOption, class_and_image: dict):
     option = TrainOption.copy()
     image_path, image_label = map(list, zip(*class_and_image.copy().items()))
     image_label_set = set(image_label)
