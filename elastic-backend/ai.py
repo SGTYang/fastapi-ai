@@ -1,6 +1,6 @@
-import torch
+import torch, copy, time
 from torch import optim
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, random_split
 from efficientnet_pytorch import EfficientNet
 from torch.utils.data import Dataset
 from torchvision import transforms
@@ -27,78 +27,149 @@ def setModel(model_name: str, num_classes: int):
     pretrained = EfficientNet.from_pretrained(model_name, num_classes=num_classes)
     return (image_size, pretrained)
 
-def makeTensor(image_path: list, label_list: list, image_size: int):
+def makeTensor(dataset: dict, image_size: int):
     transform = transforms.Compose([
         transforms.ToTensor(),
         transforms.Resize(image_size),
         transforms.CenterCrop(image_size)
-    ])
-    return GenerateDataset(image_path.copy(), label_list.copy(), transform=transform)
-
-def trainMain(TrainOption, class_and_image: dict):
-    option = TrainOption.copy()
-    image_path, image_label = map(list, zip(*class_and_image.copy().items()))
-    image_label_set = set(image_label)
-    image_size, pretrained_model = setModel(option.model_name, len(image_label_set))
-    device = setDevice()
-    pretrained_model.to(device)
+        ])
+    
+    image_path, image_label = map(list, zip(*dataset.copy().items()))
+    
+    return GenerateDataset(image_path, image_label, transform=transform)
+    
+def trainMain(option, dataset: dict):
+    start = time.time()
+    
+    model_input_size, model = setModel(option.model_name, len(option.query_match_items))
+    tensor_dataset = makeTensor(dataset, model_input_size)
+    model.to((device := setDevice()))
     
     optimizer_ft = optim.SGD(
-        pretrained_model.parameters(),
+        model.parameters(),
         lr = 0.05,
         momentum=0.9,
         weight_decay=1e-4
         )
+    
     exp_lr_scheduler = lr_scheduler.StepLR(optimizer_ft, step_size=7, gamma=0.1)
-    pretrained_model.train()
     
-    image_label_dict={val:idx for idx,val in enumerate(image_label_set)}
+    train_size = round((dataset_size := len(dataset))*option.train_dataset_ratio/10)
+    cross_val_size = round(dataset_size*(1-option.train_dataset_ratio/10)/2)
+    test_size = dataset_size - train_size - cross_val_size
     
-    loaded_train_dataset = DataLoader(
-        dataset = makeTensor(
-            image_path, 
-            list(map(image_label_dict.get, image_label)), 
-            image_size
-            ),
-        batch_size = option.batch_size,
-        shuffle = option.shuffle,
-        # num_workers = option.num_workers,
-        # collate_fn = option.collate_fn,
-        # pin_memory = option.pin_memory,
-        # drop_last = option.drop_last,
-        # timeout = option.timeout,
-        # worker_init_fn = option.worker_init_fn,
-        # prefetch_factor = option.prefetch_factor,
-        # persistent_workers = option.persistent_workers,
-    )
+    splited_dataset = dict(
+        zip(
+            (stages := ["train", "cross_validation", "test"]),
+            random_split(tensor_dataset, [train_size, cross_val_size, test_size])
+            )
+        )
+
+    loaded_dataset = {
+        stage: 
+            DataLoader(
+                dataset = splited_dataset[stage],
+                batch_size = option.batch_size,
+                shuffle = option.shuffle
+                ) 
+            for stage in stages
+        }
     
-    criterion = nn.CrossEntropyLoss()
-    torch.cuda.empty_cache()
-    for _ in range(option.epoch_size):
-        running_loss = 0.
-        running_corrects = 0
-        for idx, (input,label) in enumerate(loaded_train_dataset):
-            input = input.to(device)
-            label = label.to(device)
-            
-            optimizer_ft.zero_grad()
-            
-            with torch.set_grad_enabled(True):
-                outputs = pretrained_model(input)
-                _, preds = torch.max(outputs, 1)
-                loss = criterion(outputs, label)
-                
-                loss.backward()
-                optimizer_ft.step()
-            
-            running_loss += loss.item() * input.size(0)
-            running_corrects += torch.sum(preds == label.data)
-            print(f"Iteration:{idx+1}")
-        exp_lr_scheduler.step()
+    (stage_dataset_size := {stage: len(splited_dataset[stage]) for stage in stages})
+    
+    loss_algo = nn.CrossEntropyLoss()
+    
+    best_acc = 0.
+    total_epoch = 0
+    
+    while total_epoch < option.epoch_size:
+        total_epoch += 1
+        print(f"Epoch {total_epoch}/{option.epoch_size}")
         
-        epoch_loss = running_loss / len(image_path)
-        epoch_acc = running_corrects.double()/ len(image_path)
-        torch.cuda.empty_cache()
-        print(f"Loss: {epoch_loss:.4f} Acc:{epoch_acc:.4f}")
+        for stage in ["train", "cross_validation"]:
+            match stage:
+                case "train":
+                    model.train()
+                case "cross_validation":
+                    model.eval()
+            
+            running_loss = 0.
+            running_corrects = 0
+        
+            for idx, (input,label) in enumerate(loaded_dataset[stage]):
+                input, label = input.to(device), label.to(device)
+                
+                optimizer_ft.zero_grad()
+                
+                with torch.set_grad_enabled(stage=="train"):
+                    output = model(input)
+                    _, prediction = torch.max(output, 1)
+                    loss = loss_algo(output, label)
+                
+                    if stage == "train":
+                        loss.backward()
+                        optimizer_ft.step()
+                        
+                running_loss += loss.item() * input.size(0)
+                running_corrects += torch.sum(prediction == label.data)
+
+            if stage == "train":
+                exp_lr_scheduler.step()
+                    
+            epoch_loss = running_loss / stage_dataset_size[stage]
+            epoch_acc = running_corrects.double() / stage_dataset_size[stage]
+
+            print(f'{stage} Loss: {epoch_loss:.4f} Acc: {epoch_acc:.4f}')
+            
+            if stage == 'cross_validation' and epoch_acc > best_acc:
+                best_acc = epoch_acc
+                best_model_weight = copy.deepcopy(model.state_dict())
+        
+    time_elapsed = time.time() - start
     
-    return 0
+    test_loss = 0.
+    test_corrects = 0
+    
+    for input,label in loaded_dataset["test"]:
+        input, label = input.to(device), label.to(device)
+        
+        output = model(input)
+        _, prediction = torch.max(output, 1)
+        loss = loss_algo(output, label)
+        
+        test_loss += loss.item() * input.size(0)
+        test_corrects += torch.sum(prediction == label.data)
+    
+    total_loss = test_loss / stage_dataset_size["test"]
+    total_acc = test_corrects.double() / stage_dataset_size["test"]
+        
+    
+    print(f"Training complete in {time_elapsed // 60:.0f}m {time_elapsed % 60:.0f}s")
+    print(f"Best val Acc:{best_acc:4f}")
+    print(f"Test Loss:{total_loss:.4f}")
+    print(f"Test Acc:{total_acc:.4f}")
+    
+    model.load_state_dict(best_model_weight)
+    
+    print(model)
+    
+    # ''' 전체 모델 저장'''
+    # #torch.save(model, PATH)
+    # ''' inference 위해 모델 저장'''
+    # #torch.save(model.state_dict(), PATH)
+    # '''추론/학습 재개를 위해 일반 체크포인트 저장'''
+    # #torch.save({
+    # #    'epoch': epoch,
+    # #    'model_state_dict': model.state_dict(),
+    # #    'optimizer_state_dict': optimizer.state_dict(),
+    # #    'loss': loss,
+    # #}, PATH)
+    
+    return {
+        "total_epochs": f"{total_epoch}",
+        "bach_size": f"{option.batch_size}",
+        "best_acc": f"{best_acc:4f}",
+        "training_time": f"{time_elapsed // 60:.0f}m {time_elapsed % 60:.0f}s",
+        "test_loss": f"{total_loss:.4f}",
+        "test_acc": f"{total_acc:.4f}"
+        }
