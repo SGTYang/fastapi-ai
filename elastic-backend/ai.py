@@ -1,4 +1,4 @@
-import torch, copy, time
+import torch, copy, time, os
 from torch import optim
 from torch.utils.data import DataLoader, random_split
 from efficientnet_pytorch import EfficientNet
@@ -37,11 +37,19 @@ def makeTensor(dataset: dict, image_size: int):
     image_path, image_label = map(list, zip(*dataset.copy().items()))
     
     return GenerateDataset(image_path, image_label, transform=transform)
-    
+
 def trainMain(option, dataset: dict):
     start = time.time()
+    weight_list = []
     
     model_input_size, model = setModel(option.model_name, len(option.query_match_items))
+    
+    if os.path.isfile("./model_state_dict.pth"):
+        old_state = torch.load("./model_state_dict.pth")
+        weight_list.append(old_state)
+        model.load_state_dict(old_state)
+        print("loaded old weight")
+    
     tensor_dataset = makeTensor(dataset, model_input_size)
     model.to((device := setDevice()))
     
@@ -79,7 +87,7 @@ def trainMain(option, dataset: dict):
     
     loss_algo = nn.CrossEntropyLoss()
     
-    best_acc = 0.
+    cross_validation_best_acc = 0.
     total_epoch = 0
     
     while total_epoch < option.epoch_size:
@@ -121,42 +129,54 @@ def trainMain(option, dataset: dict):
 
             print(f'{stage} Loss: {epoch_loss:.4f} Acc: {epoch_acc:.4f}')
             
-            if stage == 'cross_validation' and epoch_acc > best_acc:
-                best_acc = epoch_acc
+            if stage == 'cross_validation' and epoch_acc > cross_validation_best_acc:
+                cross_validation_best_acc = epoch_acc
                 best_model_weight = copy.deepcopy(model.state_dict())
+    
+    weight_list.append(best_model_weight)
+    
+    test_max_acc = float("-inf")
+
+    for weight in weight_list:
+        model.load_state_dict(weight)
         
+        test_loss = 0.
+        test_corrects = 0
+    
+        for input,label in loaded_dataset["test"]:
+            input, label = input.to(device), label.to(device)
+            
+            output = model(input)
+            _, prediction = torch.max(output, 1)
+            loss = loss_algo(output, label)
+            
+            test_loss += loss.item() * input.size(0)
+            test_corrects += torch.sum(prediction == label.data)
+        
+        total_loss = test_loss / stage_dataset_size["test"]
+        total_acc = test_corrects.double() / stage_dataset_size["test"]
+        print(f"Test Loss:{total_loss:.4f}")
+        print(f"Test Acc:{total_acc:.4f}")
+
+        if test_max_acc < total_acc:
+            test_max_acc = total_acc
+            best_wieght = copy.deepcopy(model.state_dict())
+    
     time_elapsed = time.time() - start
-    
-    test_loss = 0.
-    test_corrects = 0
-    
-    for input,label in loaded_dataset["test"]:
-        input, label = input.to(device), label.to(device)
-        
-        output = model(input)
-        _, prediction = torch.max(output, 1)
-        loss = loss_algo(output, label)
-        
-        test_loss += loss.item() * input.size(0)
-        test_corrects += torch.sum(prediction == label.data)
-    
-    total_loss = test_loss / stage_dataset_size["test"]
-    total_acc = test_corrects.double() / stage_dataset_size["test"]
-        
-    
     print(f"Training complete in {time_elapsed // 60:.0f}m {time_elapsed % 60:.0f}s")
-    print(f"Best val Acc:{best_acc:4f}")
-    print(f"Test Loss:{total_loss:.4f}")
-    print(f"Test Acc:{total_acc:.4f}")
+    print(f"Best cross_validation_best_acc:{cross_validation_best_acc:4f}")
     
-    model.load_state_dict(best_model_weight)
+    model.load_state_dict(best_wieght)
     
-    print(model)
+    # test 데이터가 학습 데이터와 완전히 분리되고난 이후 
+    #torch.save(model.state_dict(), "./model_state_dict.pth")
     
     # ''' 전체 모델 저장'''
     # #torch.save(model, PATH)
+    
     # ''' inference 위해 모델 저장'''
     # #torch.save(model.state_dict(), PATH)
+    
     # '''추론/학습 재개를 위해 일반 체크포인트 저장'''
     # #torch.save({
     # #    'epoch': epoch,
@@ -168,8 +188,7 @@ def trainMain(option, dataset: dict):
     return {
         "total_epochs": f"{total_epoch}",
         "bach_size": f"{option.batch_size}",
-        "best_acc": f"{best_acc:4f}",
-        "training_time": f"{time_elapsed // 60:.0f}m {time_elapsed % 60:.0f}s",
-        "test_loss": f"{total_loss:.4f}",
-        "test_acc": f"{total_acc:.4f}"
+        "cross_validation_best_acc": f"{cross_validation_best_acc:4f}",
+        "training_time": f"{time_elapsed//60:.0f}m {time_elapsed%60:.0f}s",
+        "test_max_acc": f"{test_max_acc:.4f}",
         }

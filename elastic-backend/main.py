@@ -24,7 +24,8 @@ class Option(BaseModel):
         "plax", 
         "psaxal", 
         "psaxmv",
-        "psaxpml"
+        "psaxpml",
+        "psaxapical"
         ]
 
 @app.get("/")
@@ -100,7 +101,7 @@ async def getImagePath(query_type: str, option: Option):
         try:
             def resPretty(response):
                 return [(dir, i["_source"]["image_class"]) for i in response["hits"]["hits"] for dir in i["_source"]["dir"]]
-             
+            
             query_res_tuple = resPretty(elasticGet(query))
             total_images += len(query_res_tuple)
             num_dir_min_len = min(num_dir_min_len, len(query_res_tuple))
@@ -112,7 +113,7 @@ async def getImagePath(query_type: str, option: Option):
             return str("Error occured")
         
     image_label_dict = {val:idx for idx,val in enumerate(option.query_match_items)}
-    
+
     dir_class_dict = {image_dir: image_label_dict[label] for class_elem in dir_class_list for image_dir, label in class_elem[:num_dir_min_len+1]}
     
     train_res = ai.trainMain(option, dir_class_dict)
