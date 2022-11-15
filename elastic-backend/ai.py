@@ -8,9 +8,7 @@ import cv2
 from torch import nn
 from torch.optim import lr_scheduler
 
-'''
-tensor 오브젝트로 바꾸기 위한 dataset생성 class
-'''
+'''tensor 오브젝트로 바꾸기 위한 dataset생성 class'''
 class GenerateDataset(Dataset):
     def __init__(self, image: list, label: list, transform = None):
         self.image, self.label = image, label
@@ -36,9 +34,7 @@ def makeTensor(dataset: dict, image_size: int):
          transforms.Resize(image_size),
          transforms.CenterCrop(image_size)]
         )
-    
     image_path, image_label = map(list, zip(*dataset.copy().items()))
-    
     return GenerateDataset(image_path, image_label, transform=transform)
 
 def trainMain(option, dataset: dict):
@@ -90,7 +86,7 @@ def trainMain(option, dataset: dict):
         }
     
     (stage_dataset_size := {stage: len(splited_dataset[stage]) for stage in stages})
-    
+
     cross_validation_best_acc = 0.
     total_epoch = 0
     
@@ -148,7 +144,7 @@ def trainMain(option, dataset: dict):
     '''
     for weight in weight_list:
         model.load_state_dict(weight)
-        
+        model.eval()
         test_corrects = 0
     
         for input,label in loaded_dataset["test"]:
@@ -157,7 +153,6 @@ def trainMain(option, dataset: dict):
             output = model(input)
             _, prediction = torch.max(output, 1)
             loss = loss_algo(output, label)
-
             test_corrects += torch.sum(prediction == label.data)
 
         total_acc = test_corrects.double() / stage_dataset_size["test"]
@@ -183,4 +178,5 @@ def trainMain(option, dataset: dict):
         "cross_validation_best_acc": f"{cross_validation_best_acc:4f}",
         "training_time": f"{time_elapsed//60:.0f}m {time_elapsed%60:.0f}s",
         "test_max_acc": f"{test_max_acc:.4f}",
+        "splited_data_size": stage_dataset_size,
         }

@@ -1,4 +1,5 @@
-# elastic-backend
+# elastic-backend 
+post요청에 맞게 모델학습 하는 api
 
 # elastic search index mapping
 dir field mapping 수정 필요 

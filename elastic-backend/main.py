@@ -23,9 +23,9 @@ query_match_field: match query field값
 query_match_items: 
 '''
 class Option(BaseModel):
-    epoch_size: int = 3
-    batch_size: int = 32
-    shuffle: bool = False
+    epoch_size: int = 2
+    batch_size: int = 128
+    shuffle: bool = True
     train_dataset_ratio:int = 6
     query_res_size: str = "100"
     model_name: str = 'efficientnet-b0'
@@ -36,7 +36,12 @@ class Option(BaseModel):
         "psaxmv",
         "psaxpml",
         "psaxapical",
-        "4chamber"
+        "4chamber",
+        "2chamber",
+        "3chamber",
+        "5chamber",
+        "subcostal",
+        "ivc",
         ]
 
 @app.get("/")
@@ -98,7 +103,6 @@ def elasticGet(query):
     
 @app.post("/elastic/{query_type}/")
 async def getImagePath(query_type: str, option: Option):
-    
     dir_class_list = []
     total_images = 0
     num_dir_min_len = float("inf")
@@ -108,9 +112,9 @@ async def getImagePath(query_type: str, option: Option):
     -> es 수정하여 쿼리 개수 늘릴수 있지만 es에 걸리는 부하 증가
     '''
     for class_name in option.query_match_items:
-
+        
+        '''query 종류에 따라 query body 생성'''
         match query_type:
-                
             case "bool":
                 query = makeBoolQuery(option.query_res_size, makeMatchQuery(option.query_match_field, [class_name]))
 
@@ -125,9 +129,7 @@ async def getImagePath(query_type: str, option: Option):
             total_images += len(query_res_tuple)
             num_dir_min_len = min(num_dir_min_len, len(query_res_tuple))
             
-            '''
-            쿼리 결과 배열에 저장
-            '''
+            ''' 쿼리 결과 배열에 저장 '''
             dir_class_list.append(query_res_tuple)
             
         except Exception as e:
@@ -137,9 +139,7 @@ async def getImagePath(query_type: str, option: Option):
     '''{0: "class_name"} 형식으로 label 생성'''    
     image_label_dict = {val:idx for idx,val in enumerate(option.query_match_items)}
     
-    '''
-    쿼리해서 가져온 결과 이미지주소 개수가 달라 개수가 제일 적은 이미지주소가 기준이 되어 그 개수만큼 이미지주소 개수 수정 후 dir와 label mapping
-    '''
+    '''쿼리해서 가져온 결과 이미지주소 개수가 달라 개수가 제일 적은 이미지주소가 기준이 되어 그 개수만큼 이미지주소 개수 수정 후 dir와 label mapping'''
     dir_class_dict = {image_dir: image_label_dict[label] for class_elem in dir_class_list for image_dir, label in class_elem[:num_dir_min_len+1]}
     
     train_res = ai.trainMain(option, dir_class_dict)
@@ -148,8 +148,6 @@ async def getImagePath(query_type: str, option: Option):
         {
             "total_num_image": total_images,
             "gained_num_image": len(dir_class_dict),
-            }, 
-        {
             "num_dir_min_len": num_dir_min_len,
             "num_image_class": len(option.query_match_items),
             "image_class": option.query_match_items,
