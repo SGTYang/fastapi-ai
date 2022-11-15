@@ -4,10 +4,13 @@ from torch.utils.data import DataLoader, random_split
 from efficientnet_pytorch import EfficientNet
 from torch.utils.data import Dataset
 from torchvision import transforms
-from PIL import Image
+import cv2
 from torch import nn
 from torch.optim import lr_scheduler
 
+'''
+tensor 오브젝트로 바꾸기 위한 dataset생성 class
+'''
 class GenerateDataset(Dataset):
     def __init__(self, image: list, label: list, transform = None):
         self.image, self.label = image, label
@@ -15,9 +18,9 @@ class GenerateDataset(Dataset):
     
     def __len__(self):
         return len(self.image)
-
+    
     def __getitem__(self, index):
-        return self.transform(Image.open(self.image[index])), self.label[index]
+        return self.transform(cv2.imread(self.image[index])), self.label[index]
 
 def setDevice():
     return torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
@@ -28,11 +31,11 @@ def setModel(model_name: str, num_classes: int):
     return (image_size, pretrained)
 
 def makeTensor(dataset: dict, image_size: int):
-    transform = transforms.Compose([
-        transforms.ToTensor(),
-        transforms.Resize(image_size),
-        transforms.CenterCrop(image_size)
-        ])
+    transform = transforms.Compose(
+        [transforms.ToTensor(),
+         transforms.Resize(image_size),
+         transforms.CenterCrop(image_size)]
+        )
     
     image_path, image_label = map(list, zip(*dataset.copy().items()))
     
@@ -41,6 +44,7 @@ def makeTensor(dataset: dict, image_size: int):
 def trainMain(option, dataset: dict):
     start = time.time()
     weight_list = []
+    loss_algo = nn.CrossEntropyLoss()
     
     model_input_size, model = setModel(option.model_name, len(option.query_match_items))
     
@@ -48,7 +52,6 @@ def trainMain(option, dataset: dict):
         old_state = torch.load("./model_state_dict.pth")
         weight_list.append(old_state)
         model.load_state_dict(old_state)
-        print("loaded old weight")
     
     tensor_dataset = makeTensor(dataset, model_input_size)
     model.to((device := setDevice()))
@@ -59,20 +62,23 @@ def trainMain(option, dataset: dict):
         momentum=0.9,
         weight_decay=1e-4
         )
-    
+
     exp_lr_scheduler = lr_scheduler.StepLR(optimizer_ft, step_size=7, gamma=0.1)
     
+    '''train, cross val, test 데이터로 나누기'''
     train_size = round((dataset_size := len(dataset))*option.train_dataset_ratio/10)
     cross_val_size = round(dataset_size*(1-option.train_dataset_ratio/10)/2)
     test_size = dataset_size - train_size - cross_val_size
     
+    '''나누어진 데이터셋을 dict형식으로 변환'''
     splited_dataset = dict(
         zip(
             (stages := ["train", "cross_validation", "test"]),
             random_split(tensor_dataset, [train_size, cross_val_size, test_size])
             )
         )
-
+    
+    '''dataloader로 데이터셋 로드'''
     loaded_dataset = {
         stage: 
             DataLoader(
@@ -85,14 +91,11 @@ def trainMain(option, dataset: dict):
     
     (stage_dataset_size := {stage: len(splited_dataset[stage]) for stage in stages})
     
-    loss_algo = nn.CrossEntropyLoss()
-    
     cross_validation_best_acc = 0.
     total_epoch = 0
     
     while total_epoch < option.epoch_size:
         total_epoch += 1
-        print(f"Epoch {total_epoch}/{option.epoch_size}")
         
         for stage in ["train", "cross_validation"]:
             match stage:
@@ -104,7 +107,7 @@ def trainMain(option, dataset: dict):
             running_loss = 0.
             running_corrects = 0
         
-            for idx, (input,label) in enumerate(loaded_dataset[stage]):
+            for input,label in loaded_dataset[stage]:
                 input, label = input.to(device), label.to(device)
                 
                 optimizer_ft.zero_grad()
@@ -137,10 +140,15 @@ def trainMain(option, dataset: dict):
     
     test_max_acc = float("-inf")
 
+    '''
+    현재: 훈련 전후 비교해 더 좋은 weight를 가져오게 되어있음
+    
+    확장: 여러 다른 모델을 비교해 더 좋은 모델과 weight를 저장 
+        -> 여러 모델 필요 및 모델 학습시 multithread 방식으로 여러 모델 동시 학습(thread별 GPU 접근 방법 조사 필요)
+    '''
     for weight in weight_list:
         model.load_state_dict(weight)
         
-        test_loss = 0.
         test_corrects = 0
     
         for input,label in loaded_dataset["test"]:
@@ -149,14 +157,10 @@ def trainMain(option, dataset: dict):
             output = model(input)
             _, prediction = torch.max(output, 1)
             loss = loss_algo(output, label)
-            
-            test_loss += loss.item() * input.size(0)
+
             test_corrects += torch.sum(prediction == label.data)
-        
-        total_loss = test_loss / stage_dataset_size["test"]
+
         total_acc = test_corrects.double() / stage_dataset_size["test"]
-        print(f"Test Loss:{total_loss:.4f}")
-        print(f"Test Acc:{total_acc:.4f}")
 
         if test_max_acc < total_acc:
             test_max_acc = total_acc
@@ -168,23 +172,11 @@ def trainMain(option, dataset: dict):
     
     model.load_state_dict(best_wieght)
     
-    # test 데이터가 학습 데이터와 완전히 분리되고난 이후 
+    # test 데이터가 학습 데이터와 완전히 분리되고난 이후 모델 저장 및 불러오기
+    #torch.save(model, "./model.pth")
+    # inference용
     #torch.save(model.state_dict(), "./model_state_dict.pth")
-    
-    # ''' 전체 모델 저장'''
-    # #torch.save(model, PATH)
-    
-    # ''' inference 위해 모델 저장'''
-    # #torch.save(model.state_dict(), PATH)
-    
-    # '''추론/학습 재개를 위해 일반 체크포인트 저장'''
-    # #torch.save({
-    # #    'epoch': epoch,
-    # #    'model_state_dict': model.state_dict(),
-    # #    'optimizer_state_dict': optimizer.state_dict(),
-    # #    'loss': loss,
-    # #}, PATH)
-    
+
     return {
         "total_epochs": f"{total_epoch}",
         "bach_size": f"{option.batch_size}",
