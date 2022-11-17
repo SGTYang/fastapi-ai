@@ -1,4 +1,4 @@
-import torch, copy, time, os
+import torch, copy, time, os, datetime
 from torch import optim
 from torch.utils.data import DataLoader, random_split
 from efficientnet_pytorch import EfficientNet
@@ -44,10 +44,13 @@ def trainMain(option, dataset: dict):
     
     model_input_size, model = setModel(option.model_name, len(option.query_match_items))
     
+    # test 데이터가 학습 데이터와 완전히 분리되고난 이후 모델 저장 및 불러오기
+    '''
     if os.path.isfile("./model_state_dict.pth"):
         old_state = torch.load("./model_state_dict.pth")
         weight_list.append(old_state)
         model.load_state_dict(old_state)
+    '''
     
     tensor_dataset = makeTensor(dataset, model_input_size)
     model.to((device := setDevice()))
@@ -167,10 +170,10 @@ def trainMain(option, dataset: dict):
     
     model.load_state_dict(best_wieght)
     
-    # test 데이터가 학습 데이터와 완전히 분리되고난 이후 모델 저장 및 불러오기
-    #torch.save(model, "./model.pth")
+    current_time = str(datetime.datetime.now().strftime("%Y%m%d%H%M%S"))
+    torch.save(model, f"./{current_time}.pth")
     # inference용
-    #torch.save(model.state_dict(), "./model_state_dict.pth")
+    torch.save(model.state_dict(), f"./{current_time}_state_dict.pth")
 
     return {
         "total_epochs": f"{total_epoch}",

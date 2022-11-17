@@ -4,6 +4,7 @@ from fastapi import FastAPI, Request
 import requests, os, json
 from typing import Union, Dict, List
 from pydantic import BaseModel
+from requests.auth import HTTPBasicAuth
 
 '''container환경일때 환경변수 사용하기 위해'''
 ELASTIC_HOST = os.environ.get("ELASTIC_HOST", "112.220.111.68")
@@ -91,13 +92,15 @@ https면 header에 보안정보 추가
 현재 테스트 중인 es는 보안 옵션을 꺼놓아서 http요청으로만 가능
 '''
 def elasticGet(query):
-    url = f"http://{ELASTIC_HOST}:{ELASTIC_PORT}/{INDEX}/_search?"
+    url = f"https://{ELASTIC_HOST}:{ELASTIC_PORT}/{INDEX}/_search?"
     
     header = {'Content-Type': 'application/json'}
     
     return requests.get(
         url,
         headers=header,
+        verify=False,
+        auth= HTTPBasicAuth("elastic", "xB8nsHxmXqB8J9Dfgzi*"),
         data=json.dumps(query)
     ).json()
     
