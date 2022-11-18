@@ -133,11 +133,14 @@ async def getImagePath(query_type: str, option: Option):
             num_dir_min_len = min(num_dir_min_len, len(query_res_tuple))
             
             ''' 쿼리 결과 배열에 저장 '''
-            dir_class_list.append(query_res_tuple)
+            if query_res_tuple:
+                dir_class_list.append(query_res_tuple)
             
         except Exception as e:
-            print(e)
             return str("Error occured")
+    
+    if len(dir_class_list) != len(option.query_match_items):
+        return "Not enough classes at Elasticsearch"
     
     '''{0: "class_name"} 형식으로 label 생성'''    
     image_label_dict = {val:idx for idx,val in enumerate(option.query_match_items)}
