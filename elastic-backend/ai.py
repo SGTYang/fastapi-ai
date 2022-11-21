@@ -4,9 +4,9 @@ from torch.utils.data import DataLoader, random_split
 from efficientnet_pytorch import EfficientNet
 from torch.utils.data import Dataset
 from torchvision import transforms
-import cv2
 from torch import nn
 from torch.optim import lr_scheduler
+from PIL import Image
 
 '''tensor 오브젝트로 바꾸기 위한 dataset생성 class'''
 class GenerateDataset(Dataset):
@@ -18,7 +18,7 @@ class GenerateDataset(Dataset):
         return len(self.image)
     
     def __getitem__(self, index):
-        return self.transform(cv2.imread(self.image[index])), self.label[index]
+        return self.transform(Image.open(self.image[index])), self.label[index]
 
 def setDevice():
     return torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
@@ -171,10 +171,16 @@ def trainMain(option, dataset: dict):
     model.load_state_dict(best_wieght)
     
     current_time = str(datetime.datetime.now().strftime("%Y%m%d%H%M%S"))
-    torch.save(model, f"./{current_time}.pth")
+    
+    '''
+    로컬에 물리 모델 저장 네이밍 정해지면 /data에 저장 되도록 수정 및 ai service에서도 /data에 접근해 
+    배포된 모델 사용하도록 기능 생성
+    '''
+    torch.save(model, f"/data/model/{option.model_name}-{current_time}.pth")
     # inference용
-    torch.save(model.state_dict(), f"./{current_time}_state_dict.pth")
-
+    torch.save(model.state_dict(), f"/data/model/{option.model_name}-{current_time}_state_dict.pth")
+    
+    '''front로 return'''
     return {
         "total_epochs": f"{total_epoch}",
         "bach_size": f"{option.batch_size}",
@@ -182,4 +188,5 @@ def trainMain(option, dataset: dict):
         "training_time": f"{time_elapsed//60:.0f}m {time_elapsed%60:.0f}s",
         "test_max_acc": f"{test_max_acc:.4f}",
         "splited_data_size": stage_dataset_size,
+        "model": model,
         }

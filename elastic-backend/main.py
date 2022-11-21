@@ -1,8 +1,7 @@
 import ai
-from xmlrpc.client import boolean
-from fastapi import FastAPI, Request
+from fastapi import FastAPI
 import requests, os, json
-from typing import Union, Dict, List
+from typing import List
 from pydantic import BaseModel
 from requests.auth import HTTPBasicAuth
 
@@ -72,7 +71,7 @@ def makeBoolQuery(query_size: int, match_query: list):
         "size": query_size
     }
 
-'''추후 데이터 집게를 위한 aggs 쿼리 생성 함수 미완성'''
+'''추후 데이터 집게를 위한 aggs 쿼리 생성 함수-미완성'''
 def makeAggsQuery():
     return{
         "_source": {
@@ -139,6 +138,7 @@ async def getImagePath(query_type: str, option: Option):
         except Exception as e:
             return str("Error occured")
     
+    '''요청한 클래스 수와 가져온 클래스가 다를때 예외처리'''
     if len(dir_class_list) != len(option.query_match_items):
         return "Not enough classes at Elasticsearch"
     

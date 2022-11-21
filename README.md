@@ -2,8 +2,8 @@
 post요청에 맞게 모델학습 하는 api
 
 # elastic search index mapping
-dir field mapping 수정 필요 
-"dir" 필드 타입을 "text"에서 "nested"로
+## dicom 인덱스
+  dir field mapping 개선 필요 
 
 PUT /test_index
 {
@@ -321,6 +321,28 @@ PUT /test_index
         }
       },
       "image_class": {
+        "type": "keyword"
+      },
+      "dir": {
+        "type": "text"
+      }
+    }
+  }
+}
+
+## model 인덱스 mapping
+e.g  "class": "classification",
+      "name": "efficientnet-b0",
+      "dir": "/data/model/efficientnet-b0-20221121103102.pth"
+
+PUT /test_index
+{
+  "mappings": {
+    "properties": {
+      "class": {
+        "type": "keyword"
+      },
+      "name": {
         "type": "keyword"
       },
       "dir": {
