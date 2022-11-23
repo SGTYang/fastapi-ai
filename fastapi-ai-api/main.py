@@ -1,11 +1,11 @@
-import ai
+from ai import ModelTrain
 from fastapi import FastAPI
 import requests, os, json
 from typing import List
 from pydantic import BaseModel
 from requests.auth import HTTPBasicAuth
 
-'''container환경일때 환경변수 사용하기 위해'''
+'''환경변수 '''
 ELASTIC_HOST = os.environ.get("ELASTIC_HOST", "112.220.111.68")
 ELASTIC_PORT = os.environ.get("ELASTIC_PORT", "9200")
 INDEX = os.environ.get("ELASTIC_INDEX", "test_index")
@@ -13,8 +13,8 @@ INDEX = os.environ.get("ELASTIC_INDEX", "test_index")
 app = FastAPI()
 
 '''
-epoch_size: 에포크 크기
-batch_size: 배치 사이즈
+epoch_size: epoch 크기
+batch_size: batch 사이즈
 shuffle: 셔플 여부
 train_dataset_ratio: train 데이터셋 크기 비율 
 query_res_size: 쿼리 요청 사이즈
@@ -86,9 +86,9 @@ def makeAggsQuery():
     }
     
 '''
-http사용해 elasticsearch에 쿼리 요청
-https면 header에 보안정보 추가
-현재 테스트 중인 es는 보안 옵션을 꺼놓아서 http요청으로만 가능
+현재: http사용해 elasticsearch에 쿼리 요청, https면 보안정보 추가필요
+
+확장: https cert 사용 고려
 '''
 def elasticGet(query):
     url = f"https://{ELASTIC_HOST}:{ELASTIC_PORT}/{INDEX}/_search?"
@@ -102,7 +102,7 @@ def elasticGet(query):
         auth= HTTPBasicAuth("elastic", "xB8nsHxmXqB8J9Dfgzi*"),
         data=json.dumps(query)
     ).json()
-    
+
 @app.post("/elastic/{query_type}/")
 async def getImagePath(query_type: str, option: Option):
     dir_class_list = []
@@ -110,7 +110,7 @@ async def getImagePath(query_type: str, option: Option):
     num_dir_min_len = float("inf")
     
     ''' 
-    가져올 class 개수가 많아지고 쿼리 사이즈가 증가하면 es에서 한번에 쿼리할 수 있는 개수를 초과하기 때문에 class별 나눠서 여러번 쿼리
+    가져올 class 개수가 많아지고 쿼리 사이즈가 증가하면 es에서 한번에 쿼리할 수 있는 개수(10,000개)를 초과하기 때문에 class별 나눠서 여러번 쿼리
     -> es 수정하여 쿼리 개수 늘릴수 있지만 es에 걸리는 부하 증가
     '''
     for class_name in option.query_match_items:
@@ -135,7 +135,7 @@ async def getImagePath(query_type: str, option: Option):
             if query_res_tuple:
                 dir_class_list.append(query_res_tuple)
             
-        except Exception as e:
+        except:
             return str("Error occured")
     
     '''요청한 클래스 수와 가져온 클래스가 다를때 예외처리'''
@@ -148,7 +148,10 @@ async def getImagePath(query_type: str, option: Option):
     '''쿼리해서 가져온 결과 이미지주소 개수가 달라 개수가 제일 적은 이미지주소가 기준이 되어 그 개수만큼 이미지주소 개수 수정 후 dir와 label mapping'''
     dir_class_dict = {image_dir: image_label_dict[label] for class_elem in dir_class_list for image_dir, label in class_elem[:num_dir_min_len+1]}
     
-    train_res = ai.trainMain(option, dir_class_dict)
+    '''train 하는 부분'''
+    ai_object = ModelTrain(option)
+    
+    train_res = ai_object.train(dir_class_dict)
     
     return [
         {
@@ -157,6 +160,8 @@ async def getImagePath(query_type: str, option: Option):
             "num_dir_min_len": num_dir_min_len,
             "num_image_class": len(option.query_match_items),
             "image_class": option.query_match_items,
+            "epoch_size": option.epoch_size,
+            "batch_size": option.batch_size
             },
         train_res
         ]

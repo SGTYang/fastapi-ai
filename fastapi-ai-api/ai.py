@@ -20,173 +20,176 @@ class GenerateDataset(Dataset):
     def __getitem__(self, index):
         return self.transform(Image.open(self.image[index])), self.label[index]
 
-def setDevice():
-    return torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
-
-def setModel(model_name: str, num_classes: int):
-    image_size = EfficientNet.get_image_size(model_name)
-    pretrained = EfficientNet.from_pretrained(model_name, num_classes=num_classes)
-    return (image_size, pretrained)
-
-def makeTensor(dataset: dict, image_size: int):
-    transform = transforms.Compose(
-        [transforms.ToTensor(),
-         transforms.Resize(image_size),
-         transforms.CenterCrop(image_size)]
+class ModelTrain():
+    def __init__(self, option):
+        self.option = option
+        self.device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
+        self.model = EfficientNet.from_pretrained(option.model_name, num_classes=len(option.query_match_items))
+        self.optimizer = optim.SGD(
+            self.model.parameters(),
+            lr = 0.05,
+            momentum = 0.9,
+            weight_decay = 1e-4
         )
-    image_path, image_label = map(list, zip(*dataset.copy().items()))
-    return GenerateDataset(image_path, image_label, transform=transform)
+        self.model.to(self.device)
+    
+    def learningRateScheduler(self, step_size:int, gamma:float) -> lr_scheduler:
+        return lr_scheduler.StepLR(self.optimizer, step_size=step_size, gamma=gamma)
 
-def trainMain(option, dataset: dict):
-    start = time.time()
-    weight_list = []
-    loss_algo = nn.CrossEntropyLoss()
-    
-    model_input_size, model = setModel(option.model_name, len(option.query_match_items))
-    
-    # test 데이터가 학습 데이터와 완전히 분리되고난 이후 모델 저장 및 불러오기
-    '''
-    if os.path.isfile("./model_state_dict.pth"):
-        old_state = torch.load("./model_state_dict.pth")
-        weight_list.append(old_state)
-        model.load_state_dict(old_state)
-    '''
-    
-    tensor_dataset = makeTensor(dataset, model_input_size)
-    model.to((device := setDevice()))
-    
-    optimizer_ft = optim.SGD(
-        model.parameters(),
-        lr = 0.05,
-        momentum=0.9,
-        weight_decay=1e-4
-        )
-
-    exp_lr_scheduler = lr_scheduler.StepLR(optimizer_ft, step_size=7, gamma=0.1)
-    
-    '''train, cross val, test 데이터로 나누기'''
-    train_size = round((dataset_size := len(dataset))*option.train_dataset_ratio/10)
-    cross_val_size = round(dataset_size*(1-option.train_dataset_ratio/10)/2)
-    test_size = dataset_size - train_size - cross_val_size
-    
-    '''나누어진 데이터셋을 dict형식으로 변환'''
-    splited_dataset = dict(
-        zip(
-            (stages := ["train", "cross_validation", "test"]),
-            random_split(tensor_dataset, [train_size, cross_val_size, test_size])
+    def tensor(self, dataset: dict) -> GenerateDataset:
+        image_size = EfficientNet.get_image_size(self.option.model_name)
+        
+        transform = transforms.Compose(
+            [transforms.ToTensor(),
+            transforms.Resize(image_size),
+            transforms.CenterCrop(image_size)]
             )
-        )
-    
-    '''dataloader로 데이터셋 로드'''
-    loaded_dataset = {
-        stage: 
-            DataLoader(
-                dataset = splited_dataset[stage],
-                batch_size = option.batch_size,
-                shuffle = option.shuffle
-                ) 
-            for stage in stages
-        }
-    
-    (stage_dataset_size := {stage: len(splited_dataset[stage]) for stage in stages})
-
-    cross_validation_best_acc = 0.
-    total_epoch = 0
-    
-    while total_epoch < option.epoch_size:
-        total_epoch += 1
         
-        for stage in ["train", "cross_validation"]:
-            match stage:
-                case "train":
-                    model.train()
-                case "cross_validation":
-                    model.eval()
+        image_path, image_label = map(list, zip(*dataset.copy().items()))
+        
+        return GenerateDataset(image_path, image_label, transform=transform)
+    
+    def dataload(self, data: Dataset) -> DataLoader:
+        '''
+        dataloader 타입 반환
+        '''
+        return DataLoader(
+            dataset = data, 
+            batch_size = self.option.batch_size, 
+            shuffle = self.option.shuffle
+            )
+    
+    def split(self, total_size: int) -> list:
+        '''
+        train, cross_val, test로 데이터셋 split
+        '''
+        train_size = round((total_size)*self.option.train_dataset_ratio/10)
+        cross_val_size = round(total_size*(1-self.option.train_dataset_ratio/10)/2)
+        test_size = total_size - train_size - cross_val_size
+        
+        return [train_size, cross_val_size, test_size]
+    
+    def loops(self, loaded_dataset: dict, stage_dataset_size: dict) -> tuple:
+        '''
+        현재: 훈련전 모델과 훈련후 모델을 test 단계에서 비교후 더 좋은 모델 저장
+    
+        확장: 여러 다른 모델을 비교해 더 좋은 모델과 weight를 저장 
+            -> 여러 모델 필요 및 모델 학습시 multithread 방식으로 여러 모델 동시 학습(thread별 GPU 접근 방법 조사 필요)
+        로컬에 물리 모델 저장 네이밍 정해지면 /data에 저장 되도록 수정 및 ai service에서도 /data에 접근해 
+        배포된 모델 사용하도록 기능 생성
+        '''
+        
+        best_acc = float('-inf')
+        
+        ''' 
+        learning rate scheduler 설정
+        '''
+        learning_rate_scheduler = self.learningRateScheduler(7,0.1)
+        
+        loss_algo = nn.CrossEntropyLoss()
+        
+        '''
+        test 단계에서 훈련후 모델과 전 모델 비교
+        '''
+        weights = [copy.deepcopy(self.model.state_dict())]
+        
+        for level in [["train", "cross_validation"], ["test"]]:
+            if level[0] == "test": self.option.epoch_size = len(weights)
+            best_acc = float("-inf")
             
-            running_loss = 0.
-            running_corrects = 0
-        
-            for input,label in loaded_dataset[stage]:
-                input, label = input.to(device), label.to(device)
+            for idx in range(self.option.epoch_size):
                 
-                optimizer_ft.zero_grad()
-                
-                with torch.set_grad_enabled(stage=="train"):
-                    output = model(input)
-                    _, prediction = torch.max(output, 1)
-                    loss = loss_algo(output, label)
-                
-                    if stage == "train":
-                        loss.backward()
-                        optimizer_ft.step()
-                        
-                running_loss += loss.item() * input.size(0)
-                running_corrects += torch.sum(prediction == label.data)
-
-            if stage == "train":
-                exp_lr_scheduler.step()
+                for stage in level:
                     
-            epoch_loss = running_loss / stage_dataset_size[stage]
-            epoch_acc = running_corrects.double() / stage_dataset_size[stage]
+                    match stage:
+                        case "train":
+                            self.model.train()
+                        
+                        case "cross_validation":
+                            self.model.eval()
 
-            print(f'{stage} Loss: {epoch_loss:.4f} Acc: {epoch_acc:.4f}')
-            
-            if stage == 'cross_validation' and epoch_acc > cross_validation_best_acc:
-                cross_validation_best_acc = epoch_acc
-                best_model_weight = copy.deepcopy(model.state_dict())
+                        case "test":
+                            self.model.eval()
+                            self.model.load_state_dict(weights[idx])
+                            
+                    running_loss = 0.
+                    running_corrects = 0.
+                    
+                    for input, label in loaded_dataset[stage]:
+                        input, label = input.to(self.device), label.to(self.device)
+                        
+                        if stage != "test": self.optimizer.zero_grad()
+                        
+                        with torch.set_grad_enabled(stage == "train"):
+                            output = self.model(input)
+                            _, prediction = torch.max(output, 1)
+                            loss = loss_algo(output, label)
+                            
+                            if stage == "train":
+                                loss.backward()
+                                self.optimizer.step()
+                                
+                        running_loss += loss.item() * input.size(0)
+                        running_corrects += torch.sum(prediction == label.data)
+                        
+                    if stage == "train":
+                        learning_rate_scheduler.step()
+                    
+                    Loss = running_loss / stage_dataset_size[stage]
+                    Acc = running_corrects.double() / stage_dataset_size[stage]
+                    
+                    print(f'{stage} loss: {Loss:.4f} Acc: {Acc:.4f}')
+                    
+                    if stage != 'train' and Acc > best_acc:
+                        
+                        print(f"Stage: {stage} Acc: {Acc:.4f}")
+                        
+                        best_acc = max(best_acc, Acc)
+                        best_model_weight = copy.deepcopy(self.model.state_dict())
+                        
+            if stage == "cross_validation": weights.append(best_model_weight)    
+        
+        return best_model_weight, best_acc
     
-    weight_list.append(best_model_weight)
-    
-    test_max_acc = float("-inf")
-
-    '''
-    현재: 훈련 전후 비교해 더 좋은 weight를 가져오게 되어있음
-    
-    확장: 여러 다른 모델을 비교해 더 좋은 모델과 weight를 저장 
-        -> 여러 모델 필요 및 모델 학습시 multithread 방식으로 여러 모델 동시 학습(thread별 GPU 접근 방법 조사 필요)
-    '''
-    for weight in weight_list:
-        model.load_state_dict(weight)
-        model.eval()
-        test_corrects = 0
-    
-        for input,label in loaded_dataset["test"]:
-            input, label = input.to(device), label.to(device)
-            
-            output = model(input)
-            _, prediction = torch.max(output, 1)
-            loss = loss_algo(output, label)
-            test_corrects += torch.sum(prediction == label.data)
-
-        total_acc = test_corrects.double() / stage_dataset_size["test"]
-
-        if test_max_acc < total_acc:
-            test_max_acc = total_acc
-            best_wieght = copy.deepcopy(model.state_dict())
-    
-    time_elapsed = time.time() - start
-    print(f"Training complete in {time_elapsed // 60:.0f}m {time_elapsed % 60:.0f}s")
-    print(f"Best cross_validation_best_acc:{cross_validation_best_acc:4f}")
-    
-    model.load_state_dict(best_wieght)
-    
-    current_time = str(datetime.datetime.now().strftime("%Y%m%d%H%M%S"))
-    
-    '''
-    로컬에 물리 모델 저장 네이밍 정해지면 /data에 저장 되도록 수정 및 ai service에서도 /data에 접근해 
-    배포된 모델 사용하도록 기능 생성
-    '''
-    torch.save(model, f"/data/model/{option.model_name}-{current_time}.pth")
-    # inference용
-    torch.save(model.state_dict(), f"/data/model/{option.model_name}-{current_time}_state_dict.pth")
-    
-    '''front로 return'''
-    return {
-        "total_epochs": f"{total_epoch}",
-        "bach_size": f"{option.batch_size}",
-        "cross_validation_best_acc": f"{cross_validation_best_acc:4f}",
-        "training_time": f"{time_elapsed//60:.0f}m {time_elapsed%60:.0f}s",
-        "test_max_acc": f"{test_max_acc:.4f}",
-        "splited_data_size": stage_dataset_size,
-        "model": model,
+    def train(self, dataset: dict) -> dict:
+        start = time.time()
+        
+        '''self.dataset을 tensor로 변경'''
+        tensor_dataset = self.tensor(dataset)
+        
+        '''나누어진 데이터셋을 dict형식으로 변환'''
+        splited_dataset = dict(zip((stages := ["train", "cross_validation", "test"]), random_split(tensor_dataset, self.split(len(dataset)))))
+        
+        '''
+        loaded_dataset =
+        {
+            "train": DataLoader,
+            "cross_validation": DataLoader,
+            "test": DataLoader,
+        }
+        '''
+        loaded_dataset = {stage: self.dataload(splited_dataset[stage]) for stage in stages}
+        
+        '''
+        stage_dataset_size =
+        {
+            "train": train_size,
+            "cross_validation": cross_validation_size,
+            "test": test_size
+        }
+        '''
+        stage_dataset_size = {stage: len(splited_dataset[stage]) for stage in stages}
+        
+        '''
+        iterate 하면서 단계별로 train, cross_validation, test 실행
+        '''
+        model_weight, acc = self.loops(loaded_dataset, stage_dataset_size)
+        
+        time_elapsed = time.time() - start
+        
+        return {
+            "training_time": f"{time_elapsed//60:.0f}m {time_elapsed%60:.0f}s",
+            "max_acc": f"{acc:.4f}",
+            "splited_data_size": stage_dataset_size,
+            "model_weight": model_weight,
         }
