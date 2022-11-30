@@ -23,12 +23,14 @@ query_match_field: match query field값
 query_match_items: 
 '''
 class Option(BaseModel):
+    model_name: str = "efficientnet-b0"
+    experiment_name: str = "heart"
     epoch_size: int = 2
     batch_size: int = 128
+    tag: dict = {"purpose": "test"}
     shuffle: bool = True
     train_dataset_ratio:int = 6
     query_res_size: str = "100"
-    model_name: str = 'efficientnet-b0'
     query_match_field: str = "image_class"
     query_match_items: List[str] = [
         "plax", 
@@ -151,8 +153,8 @@ async def getImagePath(query_type: str, option: Option):
     '''train 하는 부분'''
     ai_object = ModelTrain(option)
     
-    train_res = ai_object.train(dir_class_dict)
-    
+    train_res = ai_object.airun(dir_class_dict)
+
     return [
         {
             "total_num_image": total_images,

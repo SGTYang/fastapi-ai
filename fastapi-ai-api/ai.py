@@ -1,4 +1,4 @@
-import torch, copy, time, os, datetime
+import torch, copy, os
 from torch import optim
 from torch.utils.data import DataLoader, random_split
 from efficientnet_pytorch import EfficientNet
@@ -7,6 +7,9 @@ from torchvision import transforms
 from torch import nn
 from torch.optim import lr_scheduler
 from PIL import Image
+from aiflow import Mlflow
+
+MLFLOW_HOST = os.environ.get("MLFLOW_URL", "http://112.220.111.68:5600")
 
 '''tensor 오브젝트로 바꾸기 위한 dataset생성 class'''
 class GenerateDataset(Dataset):
@@ -79,7 +82,8 @@ class ModelTrain():
         배포된 모델 사용하도록 기능 생성
         '''
         
-        best_acc = float('-inf')
+        best_acc = best_loss = float('-inf')
+        idx = 0
         
         ''' 
         learning rate scheduler 설정
@@ -87,30 +91,20 @@ class ModelTrain():
         learning_rate_scheduler = self.learningRateScheduler(7,0.1)
         
         loss_algo = nn.CrossEntropyLoss()
-        
-        '''
-        test 단계에서 훈련후 모델과 전 모델 비교
-        '''
-        weights = [copy.deepcopy(self.model.state_dict())]
-        
+    
         for level in [["train", "cross_validation"], ["test"]]:
-            if level[0] == "test": self.option.epoch_size = len(weights)
-            best_acc = float("-inf")
             
-            for idx in range(self.option.epoch_size):
-                
+            while idx < self.option.epoch_size:
                 for stage in level:
                     
                     match stage:
                         case "train":
                             self.model.train()
-                        
                         case "cross_validation":
                             self.model.eval()
-
                         case "test":
                             self.model.eval()
-                            self.model.load_state_dict(weights[idx])
+                            self.model.load_state_dict(best_model_weight)
                             
                     running_loss = 0.
                     running_corrects = 0.
@@ -135,30 +129,38 @@ class ModelTrain():
                     if stage == "train":
                         learning_rate_scheduler.step()
                     
-                    Loss = running_loss / stage_dataset_size[stage]
-                    Acc = running_corrects.double() / stage_dataset_size[stage]
-                    
-                    print(f'{stage} loss: {Loss:.4f} Acc: {Acc:.4f}')
-                    
-                    if stage != 'train' and Acc > best_acc:
-                        
-                        print(f"Stage: {stage} Acc: {Acc:.4f}")
-                        
-                        best_acc = max(best_acc, Acc)
+                    epoch_loss = running_loss / stage_dataset_size[stage]
+                    epoch_acc = running_corrects.double() / stage_dataset_size[stage]
+
+                    if stage == 'cross_validation' and epoch_acc > best_acc:
+                        best_acc = max(best_acc, epoch_acc)
                         best_model_weight = copy.deepcopy(self.model.state_dict())
-                        
-            if stage == "cross_validation": weights.append(best_model_weight)    
-        
-        return best_model_weight, best_acc
-    
-    def train(self, dataset: dict) -> dict:
-        start = time.time()
-        
+
+                    yield [
+                        {
+                            "stage": f"{stage}",
+                            "epoch": idx,
+                            "loss": epoch_loss,
+                            "accuracy": epoch_acc,
+                        },
+                        {"model_state_dict": self.model.state_dict()}
+                    ]
+                idx += 1
+            self.option.epoch_size += 1 
+
+    def airun(self, dataset: dict) -> dict:
+        #mlflow_object = Mlflow(self.option.experiment_name, MLFLOW_HOST) if os.system(f"ping -n 1 {MLFLOW_HOST}") == 0 else None
+        mlflow_object = Mlflow(self.option.experiment_name, MLFLOW_HOST)
         '''self.dataset을 tensor로 변경'''
         tensor_dataset = self.tensor(dataset)
         
         '''나누어진 데이터셋을 dict형식으로 변환'''
-        splited_dataset = dict(zip((stages := ["train", "cross_validation", "test"]), random_split(tensor_dataset, self.split(len(dataset)))))
+        splited_dataset = dict(
+            zip(
+                (stages := ["train", "cross_validation", "test"]), 
+                random_split(tensor_dataset, self.split(len(dataset)))
+                )
+            )
         
         '''
         loaded_dataset =
@@ -178,18 +180,43 @@ class ModelTrain():
             "test": test_size
         }
         '''
+        
         stage_dataset_size = {stage: len(splited_dataset[stage]) for stage in stages}
         
         '''
         iterate 하면서 단계별로 train, cross_validation, test 실행
         '''
-        model_weight, acc = self.loops(loaded_dataset, stage_dataset_size)
+        if mlflow_object:
+            mlflow_object.start()
+            mlflow_object.autolog()
+            mlflow_object.settag(self.option.tag)
+            mlflow_object.saveparams(
+                {
+                    "query_match_items": self.option.query_match_items,
+                    "epoch_size": self.option.epoch_size,
+                    "batch_size": self.option.batch_size,
+                    "train_dataset_ratio": self.option.train_dataset_ratio,
+                    "dataset_size": stage_dataset_size
+                    }
+                )
         
-        time_elapsed = time.time() - start
+        for i in self.loops(loaded_dataset, stage_dataset_size):
+            if mlflow_object:
+                mlflow_object.logmetric(i[0])
+                mlflow_object.logModelDict(i[1]["model_state_dict"], self.option.model_name)
         
+        '''
+        실험후 모델선정은 수동으로 
+        '''
+        if mlflow_object:
+            mlflow_object.logModel(self.model, self.option.model_name)
+            mlflow_object.end()
+            
+        mlflow_object.mlflow.pyfunc.load_model(
+        model_uri = "runs:/18d1d16681e04d80a39c0d1d388f365e/efficientnet-b0",
+        dst_path = "./"
+        )
+
         return {
-            "training_time": f"{time_elapsed//60:.0f}m {time_elapsed%60:.0f}s",
-            "max_acc": f"{acc:.4f}",
-            "splited_data_size": stage_dataset_size,
-            "model_weight": model_weight,
+            "splited_data_size": stage_dataset_size
         }
