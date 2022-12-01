@@ -51,7 +51,7 @@ async def root():
     return {
         "message": "Hello World"
     }
-
+    
 ''' bool query에 쓰일 match 쿼리 생성 함수'''
 def makeMatchQuery(field: str, match_list: list):
     return [{"match": {field: elem}} for elem in match_list]

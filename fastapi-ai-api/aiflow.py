@@ -77,3 +77,9 @@ class Mlflow():
     def registerModel(self, run_id, model_path, model_name) -> None:
         mlflow.register_model(f"runs:/{run_id}/{model_path}", f"{model_name}")
         return
+    
+    def fetchModel(self, model_name, model_version):
+        mlflow.pyfunc.load_model(
+            model_uri = f"models:/{model_name}/{model_version}",
+            dst_path = "/data/model"
+        )

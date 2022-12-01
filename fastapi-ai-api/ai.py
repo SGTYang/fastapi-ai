@@ -151,6 +151,9 @@ class ModelTrain():
     def airun(self, dataset: dict) -> dict:
         #mlflow_object = Mlflow(self.option.experiment_name, MLFLOW_HOST) if os.system(f"ping -n 1 {MLFLOW_HOST}") == 0 else None
         mlflow_object = Mlflow(self.option.experiment_name, MLFLOW_HOST)
+        
+        if not mlflow_object: return {"Error": "MLflow server is not reachable"}
+        
         '''self.dataset을 tensor로 변경'''
         tensor_dataset = self.tensor(dataset)
         
@@ -186,37 +189,39 @@ class ModelTrain():
         '''
         iterate 하면서 단계별로 train, cross_validation, test 실행
         '''
-        if mlflow_object:
-            mlflow_object.start()
-            mlflow_object.autolog()
-            mlflow_object.settag(self.option.tag)
-            mlflow_object.saveparams(
-                {
-                    "query_match_items": self.option.query_match_items,
-                    "epoch_size": self.option.epoch_size,
-                    "batch_size": self.option.batch_size,
-                    "train_dataset_ratio": self.option.train_dataset_ratio,
-                    "dataset_size": stage_dataset_size
-                    }
-                )
+        mlflow_object.start()
+        mlflow_object.autolog()
+        mlflow_object.settag(self.option.tag)
+        mlflow_object.logparams(
+            {
+                "query_match_items": self.option.query_match_items,
+                "epoch_size": self.option.epoch_size,
+                "batch_size": self.option.batch_size,
+                "train_dataset_ratio": self.option.train_dataset_ratio,
+                "dataset_size": stage_dataset_size
+                }
+            )
         
         for i in self.loops(loaded_dataset, stage_dataset_size):
-            if mlflow_object:
-                mlflow_object.logmetric(i[0])
-                mlflow_object.logModelDict(i[1]["model_state_dict"], self.option.model_name)
+            mlflow_object.logmetric(i[0])
+            mlflow_object.logModelDict(i[1]["model_state_dict"], self.option.model_name)
         
         '''
         실험후 모델선정은 수동으로 
         '''
-        if mlflow_object:
-            mlflow_object.logModel(self.model, self.option.model_name)
-            mlflow_object.end()
-            
-        mlflow_object.mlflow.pyfunc.load_model(
+        
+        mlflow_object.logModel(self.model, self.option.model_name)
+        print(mlflow_object.getExInfo())
+        
+        mlflow_object.fetchModel(f"{self.option.model_name}-registered", 1)
+
+        mlflow_object.end()
+        
+        '''
         model_uri = "runs:/18d1d16681e04d80a39c0d1d388f365e/efficientnet-b0",
         dst_path = "./"
-        )
-
+        '''
+        
         return {
             "splited_data_size": stage_dataset_size
         }
