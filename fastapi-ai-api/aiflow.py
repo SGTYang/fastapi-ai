@@ -55,6 +55,11 @@ class Mlflow():
             value = metrics["loss"],
             step = metrics["epoch"]
         )
+        mlflow.log_metric(
+            key = f"f1_score_{metrics['stage']}",
+            value = metrics["f1_score"],
+            step = metrics["epoch"]
+        )
         return
     
     def logModelDict(self, model_state_dict, name) -> bool:
@@ -64,6 +69,8 @@ class Mlflow():
     
     '''
     if a registered model with the name doesn’t exist, the method registers a new model and creates Version 1
+    log_model saves the model to the MLflow tracking server
+    save_model saves the model locally to a DBFS path
     '''
     def logModel(self, model, name)-> bool:
         if not model or not name: return
@@ -72,7 +79,7 @@ class Mlflow():
             artifact_path = name,
             registered_model_name = f"{name}-registered"
             )
-        return
+        return   
     
     def registerModel(self, run_id, model_path, model_name) -> None:
         mlflow.register_model(f"runs:/{run_id}/{model_path}", f"{model_name}")

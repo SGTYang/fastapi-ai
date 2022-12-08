@@ -1,6 +1,6 @@
 import torch, copy, os
 from torch import optim
-from torch.utils.data import DataLoader, random_split
+from torch.utils.data import DataLoader
 from efficientnet_pytorch import EfficientNet
 from torch.utils.data import Dataset
 from torchvision import transforms
@@ -8,6 +8,8 @@ from torch import nn
 from torch.optim import lr_scheduler
 from PIL import Image
 from aiflow import Mlflow
+from torchmetrics import F1Score
+from sklearn.metrics import f1_score
 
 MLFLOW_HOST = os.environ.get("MLFLOW_URL", "http://112.220.111.68:5600")
 
@@ -36,9 +38,15 @@ class ModelTrain():
         )
         self.model.to(self.device)
     
+    def getF1score(self, preds, target):
+        num_classes = len(self.option.query_match_items)
+        goal = "multiclass" if num_classes > 1 else "binary"
+        f1 = F1Score(task = goal, num_classes=num_classes)
+        return f1(preds, target)
+        
     def learningRateScheduler(self, step_size:int, gamma:float) -> lr_scheduler:
         return lr_scheduler.StepLR(self.optimizer, step_size=step_size, gamma=gamma)
-
+    
     def tensor(self, dataset: dict) -> GenerateDataset:
         image_size = EfficientNet.get_image_size(self.option.model_name)
         
@@ -62,15 +70,18 @@ class ModelTrain():
             shuffle = self.option.shuffle
             )
     
-    def split(self, total_size: int) -> list:
+    def splitData(self, total_size: int) -> list:
         '''
         train, cross_val, test로 데이터셋 split
         '''
         train_size = round((total_size)*self.option.train_dataset_ratio/10)
-        cross_val_size = round(total_size*(1-self.option.train_dataset_ratio/10)/2)
+        cross_val_size = (total_size-train_size)//2
         test_size = total_size - train_size - cross_val_size
         
-        return [train_size, cross_val_size, test_size]
+        return [
+            [train_size, cross_val_size, test_size], 
+            [(0,train_size), (train_size, cross_val_size+train_size), (cross_val_size+train_size, cross_val_size+train_size+test_size)]
+            ]
     
     def loops(self, loaded_dataset: dict, stage_dataset_size: dict) -> tuple:
         '''
@@ -82,7 +93,7 @@ class ModelTrain():
         배포된 모델 사용하도록 기능 생성
         '''
         
-        best_acc = best_loss = float('-inf')
+        best_acc = float('-inf')
         idx = 0
         
         ''' 
@@ -91,7 +102,11 @@ class ModelTrain():
         learning_rate_scheduler = self.learningRateScheduler(7,0.1)
         
         loss_algo = nn.CrossEntropyLoss()
-    
+        
+        
+        '''
+        iterate 하면서 단계별로 train, cross_validation, test 실행
+        '''
         for level in [["train", "cross_validation"], ["test"]]:
             
             while idx < self.option.epoch_size:
@@ -106,8 +121,7 @@ class ModelTrain():
                             self.model.eval()
                             self.model.load_state_dict(best_model_weight)
                             
-                    running_loss = 0.
-                    running_corrects = 0.
+                    running_corrects = running_loss = f1 = 0.                    
                     
                     for input, label in loaded_dataset[stage]:
                         input, label = input.to(self.device), label.to(self.device)
@@ -122,16 +136,22 @@ class ModelTrain():
                             if stage == "train":
                                 loss.backward()
                                 self.optimizer.step()
-                                
+                        # count of the class in the ground truth target data -> classes size
+                        # count of the class in the prediction -> prediction
+                        # count how many times the class was correctly predicted
+                        
                         running_loss += loss.item() * input.size(0)
                         running_corrects += torch.sum(prediction == label.data)
+                        
+                        f1 += f1_score(label.cpu().data, prediction.cpu(), average="micro")
                         
                     if stage == "train":
                         learning_rate_scheduler.step()
                     
                     epoch_loss = running_loss / stage_dataset_size[stage]
                     epoch_acc = running_corrects.double() / stage_dataset_size[stage]
-
+                    f1score = f1/len(loaded_dataset[stage])
+                    
                     if stage == 'cross_validation' and epoch_acc > best_acc:
                         best_acc = max(best_acc, epoch_acc)
                         best_model_weight = copy.deepcopy(self.model.state_dict())
@@ -142,28 +162,44 @@ class ModelTrain():
                             "epoch": idx,
                             "loss": epoch_loss,
                             "accuracy": epoch_acc,
+                            "f1_score": f1score
                         },
                         {"model_state_dict": self.model.state_dict()}
                     ]
                 idx += 1
             self.option.epoch_size += 1 
 
-    def airun(self, dataset: dict) -> dict:
+    def airun(self, dir_class_list: list, num_dir_min_len: int) -> dict:
         #mlflow_object = Mlflow(self.option.experiment_name, MLFLOW_HOST) if os.system(f"ping -n 1 {MLFLOW_HOST}") == 0 else None
         mlflow_object = Mlflow(self.option.experiment_name, MLFLOW_HOST)
         
         if not mlflow_object: return {"Error": "MLflow server is not reachable"}
         
-        '''self.dataset을 tensor로 변경'''
-        tensor_dataset = self.tensor(dataset)
+        '''요청한 클래스 수와 가져온 클래스가 다를때 예외처리'''
+        if len(dir_class_list) != len(self.option.query_match_items):
+            return {"ERROR": "Not enough classes"}
         
-        '''나누어진 데이터셋을 dict형식으로 변환'''
-        splited_dataset = dict(
-            zip(
-                (stages := ["train", "cross_validation", "test"]), 
-                random_split(tensor_dataset, self.split(len(dataset)))
-                )
-            )
+        '''{0: "class_name"} 형식으로 label 생성'''    
+        image_label_dict = {val:idx for idx,val in enumerate(self.option.query_match_items)}
+        
+        ''' [1123, 189, 189]'''
+        '''쿼리해서 가져온 결과 이미지주소 개수가 달라 개수가 제일 적은 이미지주소가 기준이 되어 그 개수만큼 이미지주소 개수 수정 후 dir와 label mapping'''
+        
+        _, split_range = self.splitData(num_dir_min_len)
+        stage_and_size = list(zip(stages:=["train", "cross_validation", "test"], split_range))
+        
+        '''
+        아래 식을 한줄로 
+        for stage,size in [["train",1123], ["cross_validation",189], ["test",189]]:
+            tmp = {}
+            for class_elem in dir_class_list:
+                for image_dir, label in class_elem[:num_dir_min_len]:
+                    tmp.update({image_dir: image_label_dict[label]})
+            {stage: tmp.copy()}    
+        '''
+        
+        splited_dataset = {stage: self.tensor({image_dir: image_label_dict[label] for class_elem in dir_class_list for image_dir, label in class_elem[start:end]}) for stage,(start,end) in stage_and_size}
+        stage_dataset_size = {stage: len(splited_dataset[stage])for stage in stages}
         
         '''
         loaded_dataset =
@@ -175,19 +211,9 @@ class ModelTrain():
         '''
         loaded_dataset = {stage: self.dataload(splited_dataset[stage]) for stage in stages}
         
-        '''
-        stage_dataset_size =
-        {
-            "train": train_size,
-            "cross_validation": cross_validation_size,
-            "test": test_size
-        }
-        '''
-        
-        stage_dataset_size = {stage: len(splited_dataset[stage]) for stage in stages}
         
         '''
-        iterate 하면서 단계별로 train, cross_validation, test 실행
+        mlflow server에 parameter와 metric 저장
         '''
         mlflow_object.start()
         mlflow_object.autolog()
@@ -207,20 +233,12 @@ class ModelTrain():
             mlflow_object.logModelDict(i[1]["model_state_dict"], self.option.model_name)
         
         '''
-        실험후 모델선정은 수동으로 
+        mlflow server에 모델 저장, 수동으로 모델 stage 조절
+        모델 배포 방법은 
         '''
-        
         mlflow_object.logModel(self.model, self.option.model_name)
-        print(mlflow_object.getExInfo())
-        
-        mlflow_object.fetchModel(f"{self.option.model_name}-registered", 1)
 
         mlflow_object.end()
-        
-        '''
-        model_uri = "runs:/18d1d16681e04d80a39c0d1d388f365e/efficientnet-b0",
-        dst_path = "./"
-        '''
         
         return {
             "splited_data_size": stage_dataset_size

@@ -88,8 +88,6 @@ def makeAggsQuery():
     }
     
 '''
-현재: http사용해 elasticsearch에 쿼리 요청, https면 보안정보 추가필요
-
 확장: https cert 사용 고려
 '''
 def elasticGet(query):
@@ -105,7 +103,7 @@ def elasticGet(query):
         data=json.dumps(query)
     ).json()
 
-@app.post("/elastic/{query_type}/")
+@app.post("/elastic/")
 async def getImagePath(query_type: str, option: Option):
     dir_class_list = []
     total_images = 0
@@ -140,25 +138,13 @@ async def getImagePath(query_type: str, option: Option):
         except:
             return str("Error occured")
     
-    '''요청한 클래스 수와 가져온 클래스가 다를때 예외처리'''
-    if len(dir_class_list) != len(option.query_match_items):
-        return "Not enough classes at Elasticsearch"
-    
-    '''{0: "class_name"} 형식으로 label 생성'''    
-    image_label_dict = {val:idx for idx,val in enumerate(option.query_match_items)}
-    
-    '''쿼리해서 가져온 결과 이미지주소 개수가 달라 개수가 제일 적은 이미지주소가 기준이 되어 그 개수만큼 이미지주소 개수 수정 후 dir와 label mapping'''
-    dir_class_dict = {image_dir: image_label_dict[label] for class_elem in dir_class_list for image_dir, label in class_elem[:num_dir_min_len+1]}
-    
-    '''train 하는 부분'''
+    '''train'''
     ai_object = ModelTrain(option)
-    
-    train_res = ai_object.airun(dir_class_dict)
+    train_res = ai_object.airun(dir_class_list, num_dir_min_len)
 
     return [
         {
             "total_num_image": total_images,
-            "gained_num_image": len(dir_class_dict),
             "num_dir_min_len": num_dir_min_len,
             "num_image_class": len(option.query_match_items),
             "image_class": option.query_match_items,
