@@ -1,5 +1,5 @@
 # Fastapi-ai
-Train and test model using fastapi
+An API train and test a Deep Learning model 
 # Steps
   1. Query data from elasticsearch
   2. Transform the data to train model
